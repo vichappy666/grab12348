@@ -15,10 +15,12 @@ from __future__ import annotations
 import argparse
 import sys
 
+import requests
+
 from grabber import config as cfgmod
+from grabber import scheduler
 from grabber.client import AuthError
 from grabber.grabber import Grabber
-from grabber.scheduler import parse_start_time
 
 
 def cmd_check(args) -> int:
@@ -32,11 +34,20 @@ def cmd_check(args) -> int:
     print("token 有效 ✓")
     print(f"  姓名：{user.get('nickName')}")
     print(f"  手机：{user.get('phoneNumber')}")
-    # 顺带看看本月已排班 / 已满的日期
-    target = cfg.get("target", {})
-    dates = target.get("dates") or []
+    # 顺带看看目标日期 + 本月已排班 / 已满的日期
+    dates: list[str] = []
+    try:
+        target = cfgmod.build_target(cfg)
+        if any(d.lower() == "auto" for d in target.dates):
+            nr = scheduler.next_release()
+            target = cfgmod.resolve_auto_dates(target, nr)
+            print(f"  下次放班：{nr:%Y-%m-%d %H:%M}（{scheduler.weekday_cn(nr)}）")
+        dates = target.dates
+        print(f"  目标日期：{'、'.join(f'{d}（{scheduler.weekday_cn(d)}）' for d in dates)}")
+    except ValueError as e:
+        print(f"  （目标日期未配置好：{e}）")
     if dates:
-        month = str(dates[0])[:7]
+        month = dates[0][:7]
         try:
             arranged = client.get_arranged_dates(month)
             full = client.get_full_dates(month)
@@ -70,13 +81,23 @@ def cmd_list(args) -> int:
 def cmd_run(args) -> int:
     cfg = cfgmod.load_config(args.config)
     client = cfgmod.build_client(cfg)
-    target = cfgmod.build_target(cfg)
     gcfg = cfgmod.build_grabber_config(cfg)
 
-    # 定时
+    # 定时：start_at 支持 "auto" = 下一个放班时刻（周一/周四 13:00）
     start_at = None
     if not args.now:
-        start_at = parse_start_time(str(cfg.get("grab", {}).get("start_at") or ""))
+        raw = str(cfg.get("grab", {}).get("start_at") or "").strip()
+        if raw.lower() == "auto":
+            start_at = scheduler.next_release()
+            print(f"自动定时：下一个放班时刻 {start_at:%Y-%m-%d %H:%M:%S}（{scheduler.weekday_cn(start_at)}）")
+            print("（想立刻抢当前窗口的剩余名额，用 python main.py run --now）")
+        else:
+            start_at = scheduler.parse_start_time(raw)
+
+    # 日期：dates 支持 "auto" = 按开抢时刻所属放班场次展开（--now 取最近一场）
+    target = cfgmod.build_target(cfg)
+    target = cfgmod.resolve_auto_dates(target, start_at or scheduler.last_release())
+    print(f"目标日期：{'、'.join(f'{d}（{scheduler.weekday_cn(d)}）' for d in target.dates)}")
 
     grabber = Grabber(client, target, gcfg)
 
@@ -119,12 +140,17 @@ def main() -> int:
     pr.add_argument("--dry-run", action="store_true", help="只演练，不真的抢")
 
     args = p.parse_args()
-    if args.cmd == "check":
-        return cmd_check(args)
-    if args.cmd == "list":
-        return cmd_list(args)
-    if args.cmd == "run":
-        return cmd_run(args)
+    try:
+        if args.cmd == "check":
+            return cmd_check(args)
+        if args.cmd == "list":
+            return cmd_list(args)
+        if args.cmd == "run":
+            return cmd_run(args)
+    except requests.RequestException as e:
+        print(f"[X] 网络请求失败：{e}")
+        print("    平台服务器可能较慢或网络不稳，稍后重试即可。")
+        return 1
     return 1
 
 # python main.py check               # 验 token + 看本月已排班/已满日期

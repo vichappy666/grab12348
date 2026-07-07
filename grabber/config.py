@@ -1,10 +1,13 @@
 """读取 YAML 配置并转成各模块需要的对象。"""
 from __future__ import annotations
 
+import datetime as dt
+from dataclasses import replace
 from pathlib import Path
 
 import yaml
 
+from . import scheduler
 from .client import Grab12348Client, BASE_URL
 from .grabber import GrabberConfig
 from .targeting import TargetSpec
@@ -30,29 +33,49 @@ def build_client(cfg: dict) -> Grab12348Client:
             "获取方法见 README：登录后从浏览器开发者工具里复制 Authorization 的 Bearer 值。"
         )
     base_url = auth.get("base_url") or BASE_URL
-    return Grab12348Client(token=token, base_url=base_url)
+    timeout = float(auth.get("timeout") or 20.0)
+    return Grab12348Client(token=token, base_url=base_url, timeout=timeout)
+
+
+def _str_list(v) -> list[str]:
+    if isinstance(v, str):
+        v = [v]
+    return [str(x).strip() for x in (v or []) if str(x).strip()]
 
 
 def build_target(cfg: dict) -> TargetSpec:
     t = cfg.get("target", {})
-    dates = t.get("dates") or []
-    if isinstance(dates, str):
-        dates = [dates]
-    dates = [str(d).strip() for d in dates if str(d).strip()]
+    dates = _str_list(t.get("dates"))
     if not dates:
-        raise ValueError("请在 config.yaml 的 target.dates 至少填一个日期，如 2026-05-22")
+        raise ValueError("请在 config.yaml 的 target.dates 至少填一个日期，或填 auto")
 
-    shift_names = t.get("shift_names") or []
-    if isinstance(shift_names, str):
-        shift_names = [shift_names]
-    shift_names = [str(s).strip() for s in shift_names if str(s).strip()]
+    order = _str_list(t.get("order"))
+    order_friday = _str_list(t.get("order_friday"))
+    if not order and not order_friday:
+        raise ValueError("请在 config.yaml 的 target.order / order_friday 配置班次顺位，如 [C, B, D]")
 
-    return TargetSpec(
-        dates=dates,
-        shift_names=shift_names,
-        time_after=str(t.get("time_after") or "").strip(),
-        time_before=str(t.get("time_before") or "").strip(),
-    )
+    prefer = str(t.get("prefer") or "优").strip()
+    return TargetSpec(dates=dates, order=order, order_friday=order_friday, prefer=prefer)
+
+
+def resolve_auto_dates(target: TargetSpec, ref: dt.datetime) -> TargetSpec:
+    """把 dates 里的 "auto" 按放班规则展开成具体日期（以 ref 时刻所属的放班场次为准）。
+
+    可与写死的日期混用，展开后去重、保序；不含 "auto" 则原样返回。
+    """
+    if not any(d.lower() == "auto" for d in target.dates):
+        return target
+    window = scheduler.release_dates(ref)
+    dates: list[str] = []
+    for d in target.dates:
+        expanded = window if d.lower() == "auto" else [d]
+        for x in expanded:
+            if x in dates:
+                continue
+            if not target.order_for(x):   # 那天没有顺位表（如周六/日）= 不抢，跳过
+                continue
+            dates.append(x)
+    return replace(target, dates=dates)
 
 
 def build_grabber_config(cfg: dict) -> GrabberConfig:
@@ -64,4 +87,5 @@ def build_grabber_config(cfg: dict) -> GrabberConfig:
         stop_after=int(g.get("stop_after", 1)),
         lead_ms=int(g.get("lead_ms", 300)),
         aggressive=bool(g.get("aggressive", False)),
+        per_day=bool(g.get("per_day", True)),
     )

@@ -1,4 +1,4 @@
-"""定时等待 + 抢到后的提醒（macOS 友好）。"""
+"""定时等待 + 抢到后的提醒（macOS 友好），以及平台放班规则的日期计算。"""
 from __future__ import annotations
 
 import datetime as dt
@@ -6,6 +6,57 @@ import platform
 import subprocess
 import sys
 import time
+
+# ==== 平台放班规则 ====
+# 每周放班两次，放班时刻 13:00（2026-07 起，原为 18:00）：
+#   周一 13:00 放 周二/周三/周四 的班（未来 3 天）
+#   周四 13:00 放 周五/周六/周日/下周一 的班（未来 4 天）
+RELEASE_TIME = dt.time(13, 0)
+RELEASE_WINDOWS = {0: 3, 3: 4}  # weekday -> 放未来几天（0=周一，3=周四）
+
+_WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+
+
+def weekday_cn(d: dt.date | dt.datetime | str) -> str:
+    if isinstance(d, str):
+        d = dt.date.fromisoformat(d[:10])
+    return _WEEKDAY_CN[d.weekday()]
+
+
+def next_release(now: dt.datetime | None = None) -> dt.datetime:
+    """下一个放班时刻（严格晚于 now）。"""
+    now = now or dt.datetime.now()
+    for i in range(8):
+        day = now.date() + dt.timedelta(days=i)
+        if day.weekday() in RELEASE_WINDOWS:
+            t = dt.datetime.combine(day, RELEASE_TIME)
+            if t > now:
+                return t
+    raise RuntimeError("找不到下一个放班时刻（不应发生）")
+
+
+def last_release(now: dt.datetime | None = None) -> dt.datetime:
+    """最近一次已到来的放班时刻（不晚于 now）。"""
+    now = now or dt.datetime.now()
+    for i in range(8):
+        day = now.date() - dt.timedelta(days=i)
+        if day.weekday() in RELEASE_WINDOWS:
+            t = dt.datetime.combine(day, RELEASE_TIME)
+            if t <= now:
+                return t
+    raise RuntimeError("找不到上一个放班时刻（不应发生）")
+
+
+def release_dates(ref: dt.datetime) -> list[str]:
+    """ref 时刻对应的可抢日期窗口。
+
+    ref 是放班日（周一/周四）则直接给该场窗口；
+    否则回退到 ref 之前最近一次放班的窗口（抢剩余名额场景）。
+    """
+    if ref.weekday() not in RELEASE_WINDOWS:
+        ref = last_release(ref)
+    days = RELEASE_WINDOWS[ref.weekday()]
+    return [(ref.date() + dt.timedelta(days=i)).isoformat() for i in range(1, days + 1)]
 
 
 def parse_start_time(value: str) -> dt.datetime | None:

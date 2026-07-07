@@ -1,50 +1,62 @@
-"""目标班次筛选与优先级排序。
+"""目标班次筛选与优先级排序（按星期分套的顺位表）。
 
-支持三种匹配条件（可组合）：
-  1. shift_names：按班次名匹配（支持子串，比如填 "C1" 能匹配 "C1（2026-普）"）
-  2. time_after / time_before：按开始时间过滤（"08:00" 这种）
-  3. 不填任何条件 = 该日期下所有有名额的班次都要
+规则：
+  - 每天有一张「顺位表」（从高到低排的班次代码），按星期切换：
+      周一/二/三/四（及默认周六/日）→ order
+      周五                          → order_friday
+      order 为空的星期 = 那天不抢（如把周六/日的表设空）
+  - 同一个班次分「优 / 普」两种场次，prefer 决定同代码里先抢哪种（默认「优」）。
+  - 精确匹配班次代码：order 里写 "C" 只命中 "C（…）"，不会误匹配 "C1"/"C3"。
 
-排序规则：
-  - 优先按 shift_names 里列出的先后顺序（越靠前优先级越高）
-  - 其次按开始时间早的优先
-你最想要哪个班，就把它写在 shift_names 第一个。
+排序键（越小越优先）：(顺位下标, 优普次序, 开始时间, 日期)。
+每天各抢一个时：按该天顺位表从高到低抢，上一顺位满了自动落到下一顺位。
 """
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import dataclass, field
 
 from .client import Shift
 
+FRIDAY = 4              # date.weekday(): 周一=0 … 周五=4 … 周日=6
+WEEKEND = (5, 6)        # 周六、周日：默认不抢
+
 
 @dataclass
 class TargetSpec:
-    dates: list[str]                          # 要抢的日期，形如 ["2026-05-22"]
-    shift_names: list[str] = field(default_factory=list)  # 偏好班次名（按优先级）
-    time_after: str = ""                      # 只要开始时间 >= 这个（含）
-    time_before: str = ""                     # 只要开始时间 <= 这个（含）
+    dates: list[str]                                       # 要抢的日期，形如 ["2026-07-10"]
+    order: list[str] = field(default_factory=list)         # 周一~周四（及周六日）顺位，从高到低
+    order_friday: list[str] = field(default_factory=list)  # 周五顺位，从高到低
+    prefer: str = "优"                                      # 同代码里优先抢「优」还是「普」
+
+    def order_for(self, date_str: str) -> list[str]:
+        """某天适用的顺位表；周五用 order_friday，周六/日不抢（空表）。"""
+        wd = dt.date.fromisoformat(date_str[:10]).weekday()
+        if wd == FRIDAY:
+            return self.order_friday
+        if wd in WEEKEND:
+            return []
+        return self.order
 
     def matches(self, s: Shift) -> bool:
         if s.date not in self.dates:
             return False
-        if self.shift_names:
-            if not any(name in s.shift_name for name in self.shift_names):
-                return False
-        if self.time_after and s.start_time < self.time_after:
-            return False
-        if self.time_before and s.start_time > self.time_before:
-            return False
-        return True
+        return s.code in self.order_for(s.date)
+
+    def _tier_rank(self, tier: str) -> int:
+        """优/普次序：命中 prefer 的排 0，另一种排 1，无优普（高峰班等）排 2。"""
+        if not tier:
+            return 2
+        return 0 if tier == self.prefer else 1
 
     def priority(self, s: Shift) -> tuple:
         """返回排序键，越小越优先。"""
-        # shift_names 里的次序：找到第一个命中的下标，没命中给一个大值
-        name_rank = len(self.shift_names)
-        for i, name in enumerate(self.shift_names):
-            if name in s.shift_name:
-                name_rank = i
-                break
-        return (name_rank, s.start_time, s.date)
+        order = self.order_for(s.date)
+        try:
+            rank = order.index(s.code)
+        except ValueError:
+            rank = len(order)
+        return (rank, self._tier_rank(s.tier), s.start_time, s.date)
 
     def pick(self, shifts: list[Shift], only_with_room: bool = True) -> list[Shift]:
         """从一批班次里挑出匹配的目标，按优先级排好序。
