@@ -126,16 +126,19 @@ def cmd_run(args) -> int:
 
 
 def main() -> int:
+    # -c 作为各子命令的公共参数，这样 `run -c xxx`（放在子命令后）也能用
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("-c", "--config", default="config.yaml", help="配置文件路径")
+
     p = argparse.ArgumentParser(description="12348 抢班次工具")
-    p.add_argument("-c", "--config", default="config.yaml", help="配置文件路径")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("check", help="校验 token / 看排班概况")
+    sub.add_parser("check", parents=[common], help="校验 token / 看排班概况")
 
-    pl = sub.add_parser("list", help="查看某天可抢班次")
+    pl = sub.add_parser("list", parents=[common], help="查看某天可抢班次")
     pl.add_argument("date", help="日期，如 2026-05-22")
 
-    pr = sub.add_parser("run", help="跑抢班")
+    pr = sub.add_parser("run", parents=[common], help="跑抢班")
     pr.add_argument("--now", action="store_true", help="忽略定时，立即开抢")
     pr.add_argument("--dry-run", action="store_true", help="只演练，不真的抢")
 
@@ -147,6 +150,12 @@ def main() -> int:
             return cmd_list(args)
         if args.cmd == "run":
             return cmd_run(args)
+    except FileNotFoundError as e:
+        print(f"[X] {e}")
+        return 1
+    except ValueError as e:
+        print(f"[X] 配置有误：{e}")
+        return 1
     except requests.RequestException as e:
         print(f"[X] 网络请求失败：{e}")
         print("    平台服务器可能较慢或网络不稳，稍后重试即可。")
@@ -161,7 +170,7 @@ def main() -> int:
 
 # list 后面的日期是必填的,得自己换成你要查的那天,比如 python main.py list 2026-05-23。其他三个命令不用带日期,它们从 config.yaml 的 target.dates 读。
 # run 那三种区别在于什么时候开抢:--dry-run 只看不抢(先确认筛选条件能命中你要的班,强烈建议正式抢前先跑这个);--now 立刻开抢;不带参数就等到 config.yaml 里 start_at 那个时刻再开抢——这是真正抢班那天用的。
-# 还有个全局参数 -c,可以指定别的配置文件,比如你想为不同日期建多份配置:python main.py run -c config_0522.yaml。一般用不上,默认就读 config.yaml。
+# 还有个可选参数 -c(放在子命令后面),可以指定别的配置文件,比如为不同日期建多份配置:python main.py run --dry-run -c config_0709.yaml。一般用不上,默认就读 config.yaml。
 # 想看完整帮助,直接敲 python main.py -h,或某个子命令的帮助 python main.py run -h,argparse 会把参数都列出来。
 # 实战顺序就是从上往下:check 验环境 → list 看班 → run --dry-run 演练 → 抢班那天 run(配好 start_at)或 run --now(手动卡点)。
 
